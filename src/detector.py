@@ -1093,6 +1093,36 @@ def run_detection(model: nn.Module,
     n_comp = 12  # 步骤槽位: MSE+Peak/Phase/Spectral/综合/NormErr?/Latent/Phys/AmpHead/SegLatent/ClusterLatent/RelErr/Align
                  # (NormErr 关闭时跳过第5步, 其余编号不变)
 
+    # ---- 决定哪些分量真正参与最终评估: 不参与的跳过计算 (省时间) ----
+    pruned = set(getattr(cfg.detect, 'pruned_components', []))
+    if pruned:
+        print(f'  [剪枝] 融合跳过分量: {sorted(pruned)} (其余正常参与)')
+    if cfg.detect.fusion_mode == 'or':
+        need = {'mp', 'ph', 'sp', 'nc', 'lt', 'phz', 'am'}
+    else:
+        need = set()
+        _cand = [
+            ('mp',  mse_weight > 0),
+            ('ph',  beta > 0),
+            ('sp',  gamma > 0),
+            ('nc',  nc_enabled and delta > 0),
+            ('lt',  epsilon > 0),
+            ('sg',  cfg.detect.seg_weight > 0),
+            ('cl',  cfg.detect.cluster_weight > 0),
+            ('rel', cfg.detect.rel_weight > 0),
+            ('phz', zeta > 0),
+            ('am',  cfg.detect.amp_head_enabled),
+            ('al',  align_enabled and align_weight > 0),
+        ]
+        for _name, _on in _cand:
+            if _on and _name not in pruned:
+                need.add(_name)
+    _skipped = sorted({'mp', 'ph', 'sp', 'nc', 'lt', 'sg', 'cl', 'rel',
+                       'phz', 'am', 'al'} - need)
+    if _skipped:
+        print(f'  [跳过] 不参与最终评估, 省计算: {_skipped}')
+    print('=' * 50)
+
     # 1. 自动缩放 (MSE + PeakErr)
     print(f'  [分量1/{n_comp}] MSE + PeakErr 缩放...')
     mse_scale, peak_scale = auto_scale_components(model, X_train_t)
@@ -1105,8 +1135,11 @@ def run_detection(model: nn.Module,
     del X_train_np, X_val_np   # 用后即弃: 各占 547/149MB, 留到函数末会与后续分量叠加
 
     # 3. 频谱特征缩放 (SpectralErr, v2频谱 z-score)
-    print(f'  [分量3/{n_comp}] SpectralErr 缩放 (频谱结构偏差, 参考FSCA)...')
-    spectral_scale, spectral_stats = auto_scale_spectral(X_train_t)
+    if 'sp' in need:
+        print(f'  [分量3/{n_comp}] SpectralErr 缩放 (频谱结构偏差, 参考FSCA)...')
+        spectral_scale, spectral_stats = auto_scale_spectral(X_train_t)
+    else:
+        spectral_scale, spectral_stats = None, None
 
     # 4. 计算三集综合分数
     print(f'  [分量4/{n_comp}] 计算综合异常分数...')
@@ -1121,9 +1154,14 @@ def run_detection(model: nn.Module,
     test_ph  = compute_phase_scores(X_test_t,  phase_scale, phase_stats, beta)
 
     # SpectralErr 分量
-    train_sp = compute_spectral_scores(X_train_t, spectral_scale, spectral_stats, gamma)
-    val_sp   = compute_spectral_scores(X_val_t,   spectral_scale, spectral_stats, gamma)
-    test_sp  = compute_spectral_scores(X_test_t,  spectral_scale, spectral_stats, gamma)
+    if 'sp' in need:
+        train_sp = compute_spectral_scores(X_train_t, spectral_scale, spectral_stats, gamma)
+        val_sp   = compute_spectral_scores(X_val_t,   spectral_scale, spectral_stats, gamma)
+        test_sp  = compute_spectral_scores(X_test_t,  spectral_scale, spectral_stats, gamma)
+    else:
+        train_sp = np.zeros(len(X_train_t))
+        val_sp   = np.zeros(len(X_val_t))
+        test_sp  = np.zeros(len(X_test_t))
 
     # DS-Err 一阶差分形态误差 (单独评估, 暂不融入主分数)
     train_ds = train_extras['ds_err']
@@ -1131,7 +1169,7 @@ def run_detection(model: nn.Module,
     test_ds  = test_extras['ds_err']
 
     # NormErr 分量 (可学习频域正常性模型)
-    if nc_enabled:
+    if 'nc' in need:
         print(f'  [分量5/{n_comp}] NormErr 缩放 (可学习频域正常性模型)...')
         normalcy_scale = auto_scale_normalcy(model, X_train_t)
         train_nc = compute_normalcy_scores(model, X_train_t, normalcy_scale, delta)
@@ -1145,21 +1183,33 @@ def run_detection(model: nn.Module,
 
     # LatentErr 分量 (LSTM latent 马氏距离, 捕捉时频重构误差均小的难样本)
     # 参考集用 val (含阻力增大/季节漂移), 压缩重尾、降低误报 (诊断实测)
-    print(f'  [分量6/{n_comp}] LatentErr 缩放 (latent 马氏距离, val漂移校准)...')
-    latent_scale, latent_stats = auto_scale_latent(model, X_val_t)
-    train_lt = compute_latent_scores(model, X_train_t, latent_scale, latent_stats, epsilon)
-    val_lt   = compute_latent_scores(model, X_val_t,   latent_scale, latent_stats, epsilon)
-    test_lt  = compute_latent_scores(model, X_test_t,  latent_scale, latent_stats, epsilon)
+    if 'lt' in need:
+        print(f'  [分量6/{n_comp}] LatentErr 缩放 (latent 马氏距离, val漂移校准)...')
+        latent_scale, latent_stats = auto_scale_latent(model, X_val_t)
+        train_lt = compute_latent_scores(model, X_train_t, latent_scale, latent_stats, epsilon)
+        val_lt   = compute_latent_scores(model, X_val_t,   latent_scale, latent_stats, epsilon)
+        test_lt  = compute_latent_scores(model, X_test_t,  latent_scale, latent_stats, epsilon)
+    else:
+        latent_scale, latent_stats = None, None
+        train_lt = np.zeros(len(X_train_t))
+        val_lt   = np.zeros(len(X_val_t))
+        test_lt  = np.zeros(len(X_test_t))
 
     # PhysErr 分量 (精选物理特征 z-score, 捕捉幅度/时长偏移类难样本)
-    print(f'  [分量7/{n_comp}] PhysErr 缩放 (物理特征 z-score)...')
-    phys_scale, phys_stats = auto_scale_phys(X_train_t)
-    train_phz = compute_phys_scores(X_train_t, phys_scale, phys_stats, zeta)
-    val_phz   = compute_phys_scores(X_val_t,   phys_scale, phys_stats, zeta)
-    test_phz  = compute_phys_scores(X_test_t,  phys_scale, phys_stats, zeta)
+    if 'phz' in need:
+        print(f'  [分量7/{n_comp}] PhysErr 缩放 (物理特征 z-score)...')
+        phys_scale, phys_stats = auto_scale_phys(X_train_t)
+        train_phz = compute_phys_scores(X_train_t, phys_scale, phys_stats, zeta)
+        val_phz   = compute_phys_scores(X_val_t,   phys_scale, phys_stats, zeta)
+        test_phz  = compute_phys_scores(X_test_t,  phys_scale, phys_stats, zeta)
+    else:
+        phys_scale, phys_stats = None, None
+        train_phz = np.zeros(len(X_train_t))
+        val_phz   = np.zeros(len(X_val_t))
+        test_phz  = np.zeros(len(X_test_t))
 
     # AmpHead 分量 (幅度解码头, 在 X_train 全正常样本上拟合)
-    if cfg.detect.amp_head_enabled:
+    if 'am' in need:
         print(f'  [分量8/{n_comp}] AmpHead 缩放 (幅度解码头, 正常样本拟合)...')
         amp_head, amp_scale = auto_scale_amp_head(model, X_train_t)
         train_am = compute_amp_scores(model, amp_head, X_train_t) * amp_scale
@@ -1173,16 +1223,22 @@ def run_detection(model: nn.Module,
 
     # SAL 时段锚 latent 分量 (YOLOv2 锚框时序映射: 时段马氏取max, 难样本局部偏移)
     # 独立阈值方案已弃: val 分位在测试集分布漂移下失效, 穷举4锚分位无组合满足FPR<1%
-    print(f'  [分量9/{n_comp}] SegLatent 缩放 (时段锚马氏max, 参考val)...')
-    seg_scales, seg_stats = auto_scale_seg_latent(model, X_val_t)
-    train_sg = compute_seg_latent_scores(model, X_train_t, seg_scales, seg_stats, cfg.detect.seg_weight)
-    val_sg   = compute_seg_latent_scores(model, X_val_t,   seg_scales, seg_stats, cfg.detect.seg_weight)
-    test_sg  = compute_seg_latent_scores(model, X_test_t,  seg_scales, seg_stats, cfg.detect.seg_weight)
+    if 'sg' in need:
+        print(f'  [分量9/{n_comp}] SegLatent 缩放 (时段锚马氏max, 参考val)...')
+        seg_scales, seg_stats = auto_scale_seg_latent(model, X_val_t)
+        train_sg = compute_seg_latent_scores(model, X_train_t, seg_scales, seg_stats, cfg.detect.seg_weight)
+        val_sg   = compute_seg_latent_scores(model, X_val_t,   seg_scales, seg_stats, cfg.detect.seg_weight)
+        test_sg  = compute_seg_latent_scores(model, X_test_t,  seg_scales, seg_stats, cfg.detect.seg_weight)
+    else:
+        seg_scales, seg_stats = None, None
+        train_sg = np.zeros(len(X_train_t))
+        val_sg   = np.zeros(len(X_val_t))
+        test_sg  = np.zeros(len(X_test_t))
 
     # ClusterLatent 机簇锚 latent 分量 (幅度类异常"相对自身机簇基线"检测)
     # 在训练集正常 latent 上按机聚类 + 每簇独立马氏, 样本取最匹配簇 (min)
     cluster_weight = cfg.detect.cluster_weight
-    if cluster_weight > 0:
+    if 'cl' in need:
         print(f'  [分量10/{n_comp}] ClusterLatent 缩放 (机簇锚马氏min, k={cfg.detect.cluster_k}, 参考train)...')
         cluster_stats, cl_mean, cl_std = auto_scale_cluster_latent(
             model, X_train_t, cfg.detect.cluster_k)
@@ -1199,7 +1255,7 @@ def run_detection(model: nn.Module,
 
     # RelErr 相对物理特征分量 (转换/峰值、转换/解锁、转换段波动 — 低基础机卡阻的波形级信号)
     rel_weight = cfg.detect.rel_weight
-    if rel_weight > 0:
+    if 'rel' in need:
         print(f'  [分量11/{n_comp}] RelErr 缩放 (相对物理特征 Σz², 参考train)...')
         rel_stats, rel_scale = auto_scale_rel(X_train_t)
         train_rel = compute_rel_scores(X_train_t, rel_stats, rel_scale, rel_weight)
@@ -1212,7 +1268,7 @@ def run_detection(model: nn.Module,
         test_rel  = np.zeros(len(X_test_t))
 
     # AlignResidual 条件对齐残差分量 (TimeCMA 跨模态对齐: 学 f≈g(z) 正常关系, 残差作异常度)
-    if align_enabled:
+    if 'al' in need:
         ref_set = X_val_t if cfg.detect.align_residual_fit_set == 'val' else X_train_t
         print(f'  [分量12/{n_comp}] AlignResidual 缩放 (条件对齐残差, '
               f'参考{cfg.detect.align_residual_fit_set}, map={cfg.detect.align_residual_map})...')
@@ -1232,9 +1288,6 @@ def run_detection(model: nn.Module,
     # 综合 (含 SAL max + 机簇锚 min + RelErr + AlignResidual)
     # 分量剪枝 (cfg.detect.pruned_components): 融合时跳过 (置零), 不影响各分量单独评估.
     # 卡阻"仅正权5个" = ['sp','nc','lt','sg','am'] → 只留 PW-MSE/Phase/Cluster/RelErr
-    pruned = set(getattr(cfg.detect, 'pruned_components', []))
-    if pruned:
-        print(f'  [剪枝] 融合跳过分量: {sorted(pruned)} (其余正常参与)')
     def _fuse(*named):
         return sum(arr for name, arr in named if name not in pruned)
     train_scores = _fuse(('mp', train_mp), ('ph', train_ph), ('sp', train_sp),
@@ -1308,41 +1361,48 @@ def run_detection(model: nn.Module,
     print(f'    虚警率(FPR): {results["fpr"]:.4f} ({results["fpr"]*100:.2f}%)')
     print(f'    误报率(FDR): {results["fdr"]:.4f} ({results["fdr"]*100:.2f}%)')
 
-    # 6. 各分量贡献对比
+    # 6. 各分量贡献对比 (仅打印已计算的分量)
     test_mp_only, _, _ = compute_scores(model, X_test_t, mse_scale, peak_scale, 0.0, mse_weight)
-    mp_auc  = roc_auc_score(labels_test, test_mp)
-    ph_auc  = roc_auc_score(labels_test, test_ph)
-    sp_auc  = roc_auc_score(labels_test, test_sp)
-    ds_auc  = roc_auc_score(labels_test, test_ds)
     full_auc = results['auc_roc']
     print(f'\n  分量贡献 (AUC-ROC):')
-    print(f'    PW-MSE (w_MSE={mse_weight}):        {mp_auc:.4f}')
+    print(f'    PW-MSE (w_MSE={mse_weight}):        '
+          f'{roc_auc_score(labels_test, test_mp):.4f}')
     if alpha > 0:
         test_peak_only, _, _ = compute_scores(model, X_test_t, 0.0, peak_scale, alpha, 1.0)
-        print(f'    PeakErr (α={alpha}):                {roc_auc_score(labels_test, test_peak_only):.4f}')
-    print(f'    DS-Err (差分形态):              {ds_auc:.4f}')
-    print(f'    PhaseErr (相位结构, β={beta}):  {ph_auc:.4f}')
-    print(f'    SpectralErr (频谱结构, γ={gamma}): {sp_auc:.4f}')
-    if nc_enabled:
-        nc_auc = roc_auc_score(labels_test, test_nc)
-        print(f'    NormErr (正常性, δ={delta}):    {nc_auc:.4f}')
-    lt_auc = roc_auc_score(labels_test, test_lt)
-    print(f'    LatentErr (latent, ε={epsilon}):  {lt_auc:.4f}')
-    sg_auc = roc_auc_score(labels_test, test_sg)
-    print(f'    SegLatent (时段锚, ω={cfg.detect.seg_weight}): {sg_auc:.4f}')
-    if cluster_weight > 0:
-        cl_auc = roc_auc_score(labels_test, test_cl)
-        print(f'    ClusterLatent (机簇锚, ω={cluster_weight}): {cl_auc:.4f}')
-    if rel_weight > 0:
-        rel_auc = roc_auc_score(labels_test, test_rel)
-        print(f'    RelErr (相对特征, ω={rel_weight}): {rel_auc:.4f}')
-    phz_auc = roc_auc_score(labels_test, test_phz)
-    print(f'    PhysErr (物理, ζ={zeta}):      {phz_auc:.4f}')
-    am_auc = roc_auc_score(labels_test, test_am)
-    print(f'    AmpHead (幅度, {amp_head is not None}):   {am_auc:.4f}')
-    if align_enabled:
-        al_auc = roc_auc_score(labels_test, test_al)
-        print(f'    AlignResidual (对齐, ω_a={align_weight}): {al_auc:.4f}')
+        print(f'    PeakErr (α={alpha}):                '
+              f'{roc_auc_score(labels_test, test_peak_only):.4f}')
+    print(f'    DS-Err (差分形态):              '
+          f'{roc_auc_score(labels_test, test_ds):.4f}')
+    if 'ph' in need:
+        print(f'    PhaseErr (相位结构, β={beta}):  '
+              f'{roc_auc_score(labels_test, test_ph):.4f}')
+    if 'sp' in need:
+        print(f'    SpectralErr (频谱结构, γ={gamma}): '
+              f'{roc_auc_score(labels_test, test_sp):.4f}')
+    if 'nc' in need:
+        print(f'    NormErr (正常性, δ={delta}):    '
+              f'{roc_auc_score(labels_test, test_nc):.4f}')
+    if 'lt' in need:
+        print(f'    LatentErr (latent, ε={epsilon}):  '
+              f'{roc_auc_score(labels_test, test_lt):.4f}')
+    if 'sg' in need:
+        print(f'    SegLatent (时段锚, ω={cfg.detect.seg_weight}): '
+              f'{roc_auc_score(labels_test, test_sg):.4f}')
+    if 'cl' in need:
+        print(f'    ClusterLatent (机簇锚, ω={cluster_weight}): '
+              f'{roc_auc_score(labels_test, test_cl):.4f}')
+    if 'rel' in need:
+        print(f'    RelErr (相对特征, ω={rel_weight}): '
+              f'{roc_auc_score(labels_test, test_rel):.4f}')
+    if 'phz' in need:
+        print(f'    PhysErr (物理, ζ={zeta}):      '
+              f'{roc_auc_score(labels_test, test_phz):.4f}')
+    if 'am' in need:
+        print(f'    AmpHead (幅度, {amp_head is not None}):   '
+              f'{roc_auc_score(labels_test, test_am):.4f}')
+    if 'al' in need:
+        print(f'    AlignResidual (对齐, ω_a={align_weight}): '
+              f'{roc_auc_score(labels_test, test_al):.4f}')
     print(f'    综合:                            {full_auc:.4f}')
 
     # 7. 退化趋势预警分析 (仅 weighted 模式有单一阈值)

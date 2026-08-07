@@ -120,6 +120,7 @@ score = w_MSE×PW-MSE + α×PeakErr + β×PhaseErr + γ×SpectralErr
 | AlignResidual (ω=0) | 条件对齐残差 | 关闭 |
 
 - **融合**:`weighted`(加权和),**剪枝** `['sp','nc','lt','sg','am']`(默认"仅正权 5 分量")
+- **省计算**:不参与最终评估的分量(剪枝 + 零权重)**直接跳过计算**(检测时打印 `[跳过]`),只算 PW-MSE/Phase/Cluster/RelErr 4 个参与分量
 - **阈值**:验证集分数 **P99.5** 分位数(理论虚警率 ≈ 0.5%)
 - **指标**:AUC-ROC / AUC-PR / 精确率 / 召回率 / F1 / 虚警率(FPR)
 
@@ -168,7 +169,7 @@ E:/anaconda/envs/DL1/python.exe build_model.py
 | 精确率 | 31.2% |
 | F1 | 0.457 |
 
-> ⚠️ 注意:检测管线中部分拟合组件(如 AlignResidual 映射)未固定随机种子,指标存在运行间波动(实测 FP 138→232 范围)。若需可复现,建议为 `auto_scale_align` 补充 `torch.manual_seed(cfg.seed)`(与 AmpHead 组件一致的修复方式)。
+> ℹ️ 由于不参与评估的分量(含未设种子的 AlignResidual/AmpHead 拟合)已被跳过,**最终融合分数只由确定性分量组成,指标可复现**。实测同配置两次运行 FP 一致(212)。
 
 ---
 
