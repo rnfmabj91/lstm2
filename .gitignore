@@ -5,8 +5,16 @@ __pycache__/
 .venv/
 venv/
 
-# 数据 (大体积, 由 lstm 项目的 MATLAB 生成器产生)
-data/
+# 数据: 仅上传 blocking 预置集 (data/raw_blocking/preprocessed/, Git LFS 管理),
+# 其余数据目录忽略 (大体积 / 由 lstm 项目 MATLAB 生成器产生)
+data/preprocessed/
+data/raw/
+data/metadata/
+data/visualization/
+data/raw_blocking/raw/
+data/raw_blocking/metadata/
+data/raw_blocking/visualization/
+!data/raw_blocking/preprocessed/
 
 # 训练/检测输出 (模型权重 + 图)
 outputs/
