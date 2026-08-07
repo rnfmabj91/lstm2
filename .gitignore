@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 数据 (大体积, 由 lstm 项目的 MATLAB 生成器产生)
+data/
+
+# 训练/检测输出 (模型权重 + 图)
+outputs/
+*.pt
+
+# 工具 / IDE
+.codegraph/
+.claude/
+.idea/
