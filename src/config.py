@@ -4,7 +4,6 @@
 ===========================================================================
 """
 from dataclasses import dataclass, field
-from typing import List
 
 
 @dataclass
@@ -65,60 +64,20 @@ class FusionConfig:
 
 @dataclass
 class DetectConfig:
-    """异常检测参数"""
-    alpha: float = 0.0              # 峰值点误差权重: score = w_MSE×MSE + α×PeakErr + β×PhaseErr + γ×SpectralErr + δ×NormErr + ε×LatentErr + ζ×PhysErr
-                                    # α=0: 峰值分量实证反相关 (窗口min AUC 0.457, mean/max 重做最高仅 0.604), 已删除
+    """异常检测参数 (4 个参与分量)"""
     beta: float = 0.3               # 相位结构偏差权重: 捕捉峰值时间偏移等形态畸变
-    gamma: float = 0.5              # 频谱结构偏差权重 (v2频谱特征 z-score; 网格搜索 0.5 优于 0.3)
-    delta: float = 0.5              # 频域正常性偏差权重 (FNM子AE重构误差; 网格搜索 0.5 优于 0.3)
-    epsilon: float = 0.7            # latent 空间马氏距离权重 (难样本: 无缓放台阶/功率不足/启动冲击; 诊断 latent AUC 0.999/0.810/0.663)
-                                    # 网格搜索: ε∈{0.3,0.5,0.7} 单调提升 FPR<1%召回 56.3→62.1→67.0→68.9%, 取 0.7
-    zeta: float = 0.0               # 物理特征 z-score 权重 (PhysErr) — 实测净负: z-score 重尾抬高 val P99.9 阈值(7.16→8.74),
-                                    # 压过无缓放台阶的 LatentErr 信号 (9/13→3/13), 单分量 AUC 高但无法转综合召回. 置 0 禁用.
-    seg_weight: float = 0.5         # 时段锚 latent 权重 (SAL, max 模式): 扫描 ω∈{0..0.5} 召回 77.7→81.6%, ω=0.5 最优
-                                    # 注: 独立阈值模式 (anchor_percentiles) 下此权重不参与综合分, SAL 作独立触发
-    cluster_k: int = 20            # 机簇锚 KMeans 簇数 (生成器 num_machines=20; 实测 k=20 AUC 卡阻0.997 难样本0.994)
-    cluster_weight: float = 1.0     # 机簇锚 latent 权重 (ClusterLatent, min-over-clusters 马氏, 2026-08-05):
-                                    # 主数据集(8故障) P99.5 召回 0.583→0.641(ω=0.5)→0.670(ω=1.0), 功率不足不变(全局LatentErr兜底);
-                                    # blocking 卡阻 综合 AUC 0.962→0.985, 固定P99.5召回持平 85/112, FPR≈1%召回 0.759→0.777
-                                    # 代价: 功率不足单分量 0.852→0.817 (min 让低幅样本匹配低基础簇), 与全局 LatentErr 互补
+    cluster_k: int = 20            # 机簇锚 KMeans 簇数 (生成器 num_machines=20)
+    cluster_weight: float = 1.0     # 机簇锚 latent 权重 (ClusterLatent, min-over-clusters 马氏):
+                                    # 幅度类异常"相对自身机簇基线"检测, 与重构误差互补
     rel_clip: float = 3.0          # RelErr z 截断上界: clip=3 优于 6 (重尾受限, 卡阻中位>val P99.5 1.35×)
-    rel_weight: float = 1.0        # 相对物理特征权重 (RelErr, 2026-08-05): Σ(z∈[0,3])², A相
+    rel_weight: float = 1.0        # 相对物理特征权重 (RelErr): Σ(z∈[0,3])², A相
                                     # 特征: r_cp=转换/峰值, r_cu=转换/解锁, conv_fluct=转换段std
                                     # 卡阻只抬转换段→比值升、功率不足整体等比例缩放→比值不变(天然免疫)
-                                    # **2026-08-05 用户决定默认开 1.0**: blocking 卡阻 P99.5召回 0.759→0.866 (97/112),
-                                    # 注意主数据集(8故障)会回退 0.641→0.544 (val重尾抬阈值, PhysErr ζ=0 同理) —
-                                    # 若要主模型优先, 改回 0.0
-    # 时段锚独立阈值 (anchor_percentiles) 已弃: val 分位在测试集分布漂移下失效,
-    # 穷举 4 锚分位 {99.3..99.95} 无任何组合满足 FPR<1% (锚触发 FP 过多). 保留 max 加权模式.
-    mse_weight: float = 0.3         # MSE 显式权重: 原隐含1.0过重 (占综合中位30.7%而AUC仅0.67, 稀释Spectral/Norm)
+    mse_weight: float = 0.3         # PW-MSE 显式权重: 原隐含1.0过重 (占综合中位30.7%而AUC仅0.67, 稀释其它分量)
                                     # 网格搜索: MSE∈{0.3,0.5,0.7}均优于1.0, 0.3时综合 AUC-ROC 0.805→0.873
-    threshold_percentile: float = 99.5  # 验证集分位数作为阈值 (2026-08-03 weighted 融合下 P99.5 优先召回: 召回73.8%/FPR0.59%, 漏检32→27)
-    fusion_mode: str = 'weighted'   # 分量融合: 'weighted'(加权和+P99.9) / 'or'(各分量独立P99.9, 任一超即异常)
-                                    # 2026-08-03 lstm_hidden 64→128 后实测: weighted(含弱,ε=0.7)@P99.30 FPR<1%最高召回 76.7%
-                                    # 优于 OR 全7(P99.95,72.8%) 与 OR 强3(73.8%); 维度扩展后 weighted 反超, 不再需要 OR 的独立阈值
+    threshold_percentile: float = 99.5  # 验证集分位数作为阈值 (weighted 融合下 P99.5 优先召回)
+    fusion_mode: str = 'weighted'   # 分量融合: 'weighted'(加权和) / 'or'(各分量独立阈值, 任一超即异常)
     or_percentile: float = 99.95    # or 模式: 各分量的独立阈值分位数 (仅 or 模式用)
-                                    # 实证(旧,lstm_hidden=64): 全7分量 P99.95 → 68.9% (0.51% FPR), 优于 P99.9(0.73%)
-    amp_head_enabled: bool = True   # 幅度解码头 (latent→peak/RMS 重构误差, 在 X_train 正常样本上拟合)
-                                    # 诊断: 启动冲击过高 AUC 0.867 / 功率不足 0.823, 全分量静默难样本的关键信号
-    # 条件对齐残差 (AlignResidual) — TimeCMA 跨模态对齐思想 (2026-08-06):
-    # 学正常跨模态关系 f ≈ g(z) (f=幅度时域+相对抬升特征, z=LSTM latent), 残差 ‖f−g(z)‖ 作异常度.
-    # latent 提供"这台机正常应怎样"上下文 → 消除机基线方差 (PhysErr 全局z-score 重尾抬阈值的病根).
-    # 实验: blocking 卡阻 FPR≈1%召回 84→99/112 (AUC 0.981→0.997, 单分量最高);
-    #   主数据集 AUC 0.850 优于 RelErr(0.645)/PhysErr(0.746); val重尾比 RelErr 轻.
-    #   弱项: 无缓放台阶/功率不足/启动冲击 仍不及 LatentErr (0.650/0.728/0.703 vs 0.995/0.877/0.850).
-    align_residual_enabled: bool = True    # 启用分量计算
-    align_residual_weight: float = 0.0     # AlignResidual 权重 (默认 0 关闭, 实验定后由用户确认)
-    align_residual_map: str = 'mlp'        # 条件映射: 'mlp'(128→64→12) / 'linear'
-    align_residual_fit_set: str = 'train'  # 拟合参考集: 'train'(纯正常) / 'val'(含漂移)
-    align_residual_fit_n: int = 0          # 参考集子采样数 (0=全部)
-    align_residual_epochs: int = 100       # 条件映射拟合轮数 (90/10 早停)
-    # 分量剪枝 (无监督提精确率): 融合时置零的分量, 空列表 = 全部参与.
-    # 卡阻专用 "仅正权5个" = ['sp','nc','lt','sg','am'] (只留 PW-MSE/Phase/Cluster/RelErr)
-    # 2026-08-06 xalign 架构下: P99.5 精确率 36.9%→41.0%, FP 166→138, FPR 0.49%→0.41%,
-    #   召回 85.7% (≥85% 仍达标). 注意: 剪掉 SegLatent 会略降召回 (86.6→85.7).
-    # **2026-08-07 用户确认取"xalign + 仅正权5个剪枝"为最终模型** → 默认即剪枝
-    pruned_components: List[str] = field(default_factory=lambda: ['sp', 'nc', 'lt', 'sg', 'am'])
 
 
 @dataclass

@@ -212,10 +212,9 @@ def save_results(results: dict, history: dict, scores: dict,
         f.write('==========================================\n')
         f.write('转辙机动作电流 双通路CNN-LSTM 异常检测结果\n')
         f.write('==========================================\n\n')
-        f.write(f'score = w_MSE×MSE×scale + α×PeakErr×scale + β×PhaseErr + γ×SpectralErr'
-                f'{(" + δ×NormErr" if cfg.model.normalcy_enabled else "")},  '
-                f'w_MSE={cfg.detect.mse_weight} α={cfg.detect.alpha} '
-                f'β={cfg.detect.beta} γ={cfg.detect.gamma} δ={cfg.detect.delta}\n')
+        f.write(f'score = w_MSE×PW-MSE×scale + β×PhaseErr×scale + ω_c×ClusterLatent + ω_r×RelErr,  '
+                f'w_MSE={cfg.detect.mse_weight} β={cfg.detect.beta} '
+                f'ω_c={cfg.detect.cluster_weight} ω_r={cfg.detect.rel_weight}\n')
         if cfg.fusion.enabled:
             f.write('时频融合: 拼接融合 (concat 双通路, 无 α 门控)\n')
         f.write('\n')

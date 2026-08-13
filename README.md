@@ -32,11 +32,9 @@
                                    │ latent + 重构 + 多模态特征
         ┌──────────────────────────┴──────────────────────────┐
         │                 src/detector.py                      │
-        │   run_detection: 12 个打分分量                       │
-        │   PW-MSE/PeakErr · PhaseErr · SpectralErr · NormErr  │
-        │   LatentErr · PhysErr · AmpHead · SegLatent          │
-        │   ClusterLatent · RelErr · AlignResidual             │
-        │   → weighted 加权和 (剪枝 5 分量)                     │
+        │   run_detection: 4 个参与分量                        │
+        │   PW-MSE · PhaseErr · ClusterLatent · RelErr         │
+        │   → weighted 加权和                                   │
         │   → 验证集 P99.5 阈值 → 检测指标(AUC/F1/召回/虚警)    │
         └──────────────────────────┬──────────────────────────┘
                                    │ 测试集分数 + 机器/天数
@@ -97,32 +95,23 @@
 
 ## 4. 异常检测管线(`src/detector.py`)
 
-综合分数为各分量加权和(每个分量先在训练集上自动缩放):
+综合分数为 4 个参与分量的加权和(每个分量先在训练集上自动缩放):
 
 ```
-score = w_MSE×PW-MSE + α×PeakErr + β×PhaseErr + γ×SpectralErr
-      + δ×NormErr + ε×LatentErr + ζ×PhysErr + ω_s×SegLatent
-      + ω_c×ClusterLatent + ω_r×RelErr + ω_a×AlignResidual
+score = w_MSE×PW-MSE + β×PhaseErr + ω_c×ClusterLatent + ω_r×RelErr
 ```
 
-| 分量 | 含义 | 默认状态 |
+| 分量 | 权重 | 含义 |
 |---|---|---|
-| PW-MSE + PeakErr | 相区加权重构误差 + 峰值误差 | ✅ 参与 |
-| PhaseErr (β=0.3) | 相位结构偏差(峰值时间偏移等形态畸变) | ✅ 参与 |
-| SpectralErr (γ=0.5) | 频谱结构偏差 | 剪枝 |
-| NormErr (δ=0.5) | 频域正常性重构误差 | 剪枝 |
-| LatentErr (ε=0.7) | LSTM latent 马氏距离 | 剪枝 |
-| PhysErr (ζ=0) | 物理特征 z-score | 关闭 |
-| AmpHead | 幅度解码头 latent→peak/RMS | 剪枝 |
-| SegLatent (ω=0.5) | 时段锚 latent(马氏 max) | 剪枝 |
-| ClusterLatent (ω=1.0) | 机簇锚 latent(KMeans k=20,min 马氏) | ✅ 参与 |
-| RelErr (ω=1.0) | 相对物理特征 Σz²(转换/峰值、转换/解锁、波动) | ✅ 参与 |
-| AlignResidual (ω=0) | 条件对齐残差 | 关闭 |
+| PW-MSE | 0.3 | 相区加权重构误差(转换段权重 2.0,掩码排除零填充) |
+| PhaseErr | 0.3 | 相位结构偏差(峰值时间偏移等形态畸变) |
+| ClusterLatent | 1.0 | 机簇锚 latent(KMeans k=20,min 马氏),幅度类异常相对自身机簇基线 |
+| RelErr | 1.0 | 相对物理特征 Σz²(转换/峰值、转换/解锁、转换段波动) |
 
-- **融合**:`weighted`(加权和),**剪枝** `['sp','nc','lt','sg','am']`(默认"仅正权 5 分量")
-- **省计算**:不参与最终评估的分量(剪枝 + 零权重)**直接跳过计算**(检测时打印 `[跳过]`),只算 PW-MSE/Phase/Cluster/RelErr 4 个参与分量
+- **融合**:`weighted`(加权和,`src/detector.py` 仅实现这 4 个参与分量;`or` 模式可选)
 - **阈值**:验证集分数 **P99.5** 分位数(理论虚警率 ≈ 0.5%)
 - **指标**:AUC-ROC / AUC-PR / 精确率 / 召回率 / F1 / 虚警率(FPR)
+- 其余曾实验过的分量(Spectral/Norm/Latent/Phys/AmpHead/SegLatent/AlignResidual)已从检测管线中移除,不再干扰架构理解。
 
 ---
 
@@ -169,7 +158,7 @@ E:/anaconda/envs/DL1/python.exe build_model.py
 | 精确率 | 31.2% |
 | F1 | 0.457 |
 
-> ℹ️ 由于不参与评估的分量(含未设种子的 AlignResidual/AmpHead 拟合)已被跳过,**最终融合分数只由确定性分量组成,指标可复现**。实测同配置两次运行 FP 一致(212)。
+> ℹ️ 最终融合分数只由 4 个确定性分量(PW-MSE/Phase/Cluster/RelErr)组成,**指标可复现**。实测同配置两次运行 FP 一致(212)。
 
 ---
 

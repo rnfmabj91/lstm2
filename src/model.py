@@ -737,23 +737,6 @@ class CNNLSTM_Autoencoder(nn.Module):
             self.seg_gru = nn.GRU(lstm_hidden * 2, 128, batch_first=True)
             self.seg_fc = nn.Linear(128, 1)
 
-    @torch.no_grad()
-    def amp_errors(self, x: torch.Tensor) -> torch.Tensor:
-        """检测侧幅度误差 (B,) — 用训练好的模型内 amp_head 预测 peak/rms → MSE."""
-        captured = {}
-        def hook(m, inp, out):
-            captured['lstm'] = out[0]   # (B, T, 2*hidden)
-        h = self.lstm.register_forward_hook(hook)
-        self(x)
-        h.remove()
-        lat = captured['lstm'].float().mean(dim=1)          # (B, 2*hidden)
-        pred = self.amp_head(lat.float())                    # (B, 6)
-        xf = x.float()
-        peak = xf.abs().max(dim=-1).values
-        rms = torch.sqrt((xf ** 2).mean(dim=-1))
-        tgt = torch.cat([peak, rms], dim=-1)
-        return ((pred - tgt) ** 2).mean(dim=1)               # (B,)
-
     def _seg_pool_seq(self, lat: torch.Tensor, n_seg: int = 4) -> torch.Tensor:
         """latent (B,T,D) → 各时段均值池化 → (B, n_seg, D). 时段按时间均分."""
         T = lat.shape[1]
@@ -770,24 +753,6 @@ class CNNLSTM_Autoencoder(nn.Module):
         seg_pool = self._seg_pool_seq(lat, n_seg)                 # (B, n_seg, D)
         gru_out, _ = self.seg_gru(seg_pool)                       # (B, n_seg, 128)
         return self.seg_fc(gru_out).squeeze(-1)                   # (B, n_seg)
-
-    @torch.no_grad()
-    def seg_disc_scores(self, x: torch.Tensor, n_seg: int = 4) -> torch.Tensor:
-        """检测侧时段判别分数 (B, n_seg): 各时段损坏概率 (学到的正常局部模式偏离).
-        分批推理, 免 OOM; 一次前向, 免检测侧马氏/z-score 现算."""
-        parts = []
-        B = cfg.train.batch_size
-        for i in range(0, len(x), B):
-            bx = x[i:i + B]
-            captured = {}
-            def hook(m, inp, out):
-                captured['lstm'] = out[0]
-            h = self.lstm.register_forward_hook(hook)
-            self(bx)
-            h.remove()
-            lat = captured['lstm'].float()
-            parts.append(torch.sigmoid(self._seg_disc_logit(lat, n_seg)))   # (B, n_seg)
-        return torch.cat(parts, dim=0)
 
     def forward(self, x: torch.Tensor, need_aux: bool = False):
         """
